@@ -26,8 +26,8 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * Changes from Qualcomm Technologies, Inc. are provided under the following license:
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ * Changes from Qualcomm Innovation Center are provided under the following license:
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
@@ -43,32 +43,31 @@
 #define CPU_HEADROOM_TOTAL 6
 #define CPU_MIN_DURATION_MS 1000
 #define CPU_MAX_DURATION_MS 60000
-static const char *pkg = "QTI PowerHAL";
+static const char* pkg = "QTI PowerHAL";
 
-#include "utils.h"
 #include "Power.h"
-
 #include "PowerHintSession.h"
+#include "utils.h"
+
+#include <android-base/file.h>
+#include <android-base/logging.h>
 #include <fmq/AidlMessageQueue.h>
 #include <fmq/EventFlag.h>
-
-#include <android-base/logging.h>
 #include <thread>
-#include <aidl/android/hardware/power/BnPower.h>
 
-#include <android-base/logging.h>
+#include <aidl/android/hardware/power/BnPower.h>
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
 
-using ::aidl::android::hardware::power::BnPower;
-using ::aidl::android::hardware::power::IPower;
-using ::aidl::android::hardware::power::Mode;
-using ::aidl::android::hardware::power::Boost;
 using ::aidl::android::hardware::common::fmq::MQDescriptor;
 using ::aidl::android::hardware::common::fmq::SynchronizedReadWrite;
+using ::aidl::android::hardware::power::BnPower;
+using ::aidl::android::hardware::power::Boost;
 using ::aidl::android::hardware::power::ChannelMessage;
 using ::aidl::android::hardware::power::CompositionData;
 using ::aidl::android::hardware::power::CompositionUpdate;
+using ::aidl::android::hardware::power::IPower;
+using ::aidl::android::hardware::power::Mode;
 using ::android::AidlMessageQueue;
 
 using ::ndk::ScopedAStatus;
@@ -86,26 +85,30 @@ extern bool setDeviceSpecificMode(Mode type, bool enabled);
 #endif
 
 void setInteractive(bool interactive) {
-    set_interactive(interactive ? 1:0);
+    set_interactive(interactive ? 1 : 0);
 }
 
 template <class T>
 constexpr size_t enum_size() {
     return static_cast<size_t>(*(ndk::enum_range<T>().end() - 1)) + 1;
 }
+
 ndk::ScopedAStatus Power::setMode(Mode type, bool enabled) {
     LOG(INFO) << "Power setMode: " << static_cast<int32_t>(type) << " to: " << enabled;
-
 #ifdef MODE_EXT
     if (setDeviceSpecificMode(type, enabled)) {
         return ndk::ScopedAStatus::ok();
     }
 #endif
-
-    switch(type){
+    switch (type) {
+#ifdef TAP_TO_WAKE_NODE
         case Mode::DOUBLE_TAP_TO_WAKE:
+            ::android::base::WriteStringToFile(enabled ? "1" : "0", TAP_TO_WAKE_NODE, true);
+            break;
+#else
+        case Mode::DOUBLE_TAP_TO_WAKE:
+#endif
         case Mode::LOW_POWER:
-        case Mode::LAUNCH:
         case Mode::DEVICE_IDLE:
         case Mode::DISPLAY_INACTIVE:
         case Mode::AUDIO_STREAMING_LOW_LATENCY:
@@ -119,9 +122,11 @@ ndk::ScopedAStatus Power::setMode(Mode type, bool enabled) {
         case Mode::EXPENSIVE_RENDERING:
             set_expensive_rendering(enabled);
             break;
+        case Mode::LAUNCH:
+            power_hint(POWER_HINT_LAUNCH, enabled ? &enabled : NULL);
+            break;
         case Mode::INTERACTIVE:
             setInteractive(enabled);
-            power_hint(POWER_HINT_INTERACTION, NULL);
             break;
         case Mode::SUSTAINED_PERFORMANCE:
         case Mode::FIXED_PERFORMANCE:
@@ -136,14 +141,12 @@ ndk::ScopedAStatus Power::setMode(Mode type, bool enabled) {
 
 ndk::ScopedAStatus Power::isModeSupported(Mode type, bool* _aidl_return) {
     LOG(INFO) << "Power isModeSupported: " << static_cast<int32_t>(type);
-
 #ifdef MODE_EXT
     if (isDeviceSpecificModeSupported(type, _aidl_return)) {
         return ndk::ScopedAStatus::ok();
     }
 #endif
-
-    switch(type){
+    switch (type) {
         case Mode::EXPENSIVE_RENDERING:
             if (is_expensive_rendering_supported()) {
                 *_aidl_return = true;
@@ -151,6 +154,10 @@ ndk::ScopedAStatus Power::isModeSupported(Mode type, bool* _aidl_return) {
                 *_aidl_return = false;
             }
             break;
+#ifdef TAP_TO_WAKE_NODE
+        case Mode::DOUBLE_TAP_TO_WAKE:
+#endif
+        case Mode::LAUNCH:
         case Mode::INTERACTIVE:
         case Mode::SUSTAINED_PERFORMANCE:
         case Mode::FIXED_PERFORMANCE:
@@ -164,18 +171,34 @@ ndk::ScopedAStatus Power::isModeSupported(Mode type, bool* _aidl_return) {
 }
 
 ndk::ScopedAStatus Power::setBoost(Boost type, int32_t durationMs) {
-    LOG(INFO) << "Power setBoost: " << static_cast<int32_t>(type)
-                << ", duration: " << durationMs;
+    LOG(VERBOSE) << "Power setBoost: " << static_cast<int32_t>(type)
+                 << ", duration: " << durationMs;
+    switch (type) {
+        case Boost::INTERACTION:
+            power_hint(POWER_HINT_INTERACTION, &durationMs);
+            break;
+        default:
+            LOG(INFO) << "Boost " << static_cast<int32_t>(type) << "Not Supported";
+            break;
+    }
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Power::isBoostSupported(Boost type, bool* _aidl_return) {
     LOG(INFO) << "Power isBoostSupported: " << static_cast<int32_t>(type);
-    *_aidl_return = false;
+    switch (type) {
+        case Boost::INTERACTION:
+            *_aidl_return = true;
+            break;
+        default:
+            *_aidl_return = false;
+            break;
+    }
     return ndk::ScopedAStatus::ok();
 }
 
-ndk::ScopedAStatus Power::getCpuHeadroom(const CpuHeadroomParams& cpuHeadroomParams, CpuHeadroomResult* cpuHeadroomResult) {
+ndk::ScopedAStatus Power::getCpuHeadroom(const CpuHeadroomParams& cpuHeadroomParams,
+                                         CpuHeadroomResult* cpuHeadroomResult) {
     LOG(INFO) << "Power getCpuHeadroom";
     int durationMillis = cpuHeadroomParams.calculationWindowMillis;
     if (durationMillis > CPU_MAX_DURATION_MS) {
@@ -185,7 +208,7 @@ ndk::ScopedAStatus Power::getCpuHeadroom(const CpuHeadroomParams& cpuHeadroomPar
         durationMillis = CPU_MIN_DURATION_MS;
     }
 
-    int args[] = { CPU_HEADROOM_TOTAL, durationMillis / 1000 };
+    int args[] = {CPU_HEADROOM_TOTAL, durationMillis / 1000};
     int headroom = send_perf_get_feedback_extn(VENDOR_FEEDBACK_CPU_HEADROOM, pkg, 2, args);
     if (headroom < 0) {
         LOG(ERROR) << "Failed to get CPU headroom";
@@ -195,7 +218,8 @@ ndk::ScopedAStatus Power::getCpuHeadroom(const CpuHeadroomParams& cpuHeadroomPar
     return ndk::ScopedAStatus::ok();
 }
 
-ndk::ScopedAStatus Power::getGpuHeadroom(const GpuHeadroomParams& gpuHeadroomParams, GpuHeadroomResult* gpuHeadroomResult) {
+ndk::ScopedAStatus Power::getGpuHeadroom(const GpuHeadroomParams& gpuHeadroomParams,
+                                         GpuHeadroomResult* gpuHeadroomResult) {
     LOG(INFO) << "Power getGpuHeadroom";
     int calculationType = -1;
     if (gpuHeadroomParams.calculationType == GpuHeadroomParams::CalculationType::MIN) {
@@ -213,17 +237,19 @@ ndk::ScopedAStatus Power::getGpuHeadroom(const GpuHeadroomParams& gpuHeadroomPar
         durationMillis = GPU_MIN_DURATION_MS;
     }
 
-    int args[] = { calculationType, durationMillis / 1000 };
+    int args[] = {calculationType, durationMillis / 1000};
     int headroom = send_perf_get_feedback_extn(VENDOR_FEEDBACK_GPU_HEADROOM, pkg, 2, args);
     if (headroom < 0) {
-       LOG(ERROR) << "Failed to get GPU headroom";
-       return ndk::ScopedAStatus::ok();
+        LOG(ERROR) << "Failed to get GPU headroom";
+        return ndk::ScopedAStatus::ok();
     }
     gpuHeadroomResult->set<GpuHeadroomResult::Tag::globalHeadroom>(static_cast<float>(headroom));
     return ndk::ScopedAStatus::ok();
 }
 
-ndk::ScopedAStatus Power::createHintSession(int32_t tgid, int32_t uid, const std::vector<int32_t>& threadIds, int64_t durationNanos,
+ndk::ScopedAStatus Power::createHintSession(int32_t tgid, int32_t uid,
+                                            const std::vector<int32_t>& threadIds,
+                                            int64_t durationNanos,
                                             std::shared_ptr<IPowerHintSession>* _aidl_return) {
     LOG(INFO) << "Power createHintSession";
     if (threadIds.size() == 0) {
@@ -237,10 +263,10 @@ ndk::ScopedAStatus Power::createHintSession(int32_t tgid, int32_t uid, const std
 
 ndk::ScopedAStatus Power::createHintSessionWithConfig(
         int32_t tgid, int32_t uid, const std::vector<int32_t>& threadIds, int64_t durationNanos,
-        SessionTag tag, SessionConfig* config, std::shared_ptr<IPowerHintSession>* _aidl_return)
-{
-    if (tag != SessionTag::OTHER && tag != SessionTag::SURFACEFLINGER && tag != SessionTag::HWUI && tag != SessionTag::GAME) {
-       return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+        SessionTag tag, SessionConfig* config, std::shared_ptr<IPowerHintSession>* _aidl_return) {
+    if (tag != SessionTag::OTHER && tag != SessionTag::SURFACEFLINGER && tag != SessionTag::HWUI &&
+        tag != SessionTag::GAME) {
+        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
     }
     auto out = createHintSession(tgid, uid, threadIds, durationNanos, _aidl_return);
     static_cast<PowerHintSessionImpl*>(_aidl_return->get())->getSessionConfig(config);
@@ -279,35 +305,36 @@ int64_t bitsForEnum() {
 }
 
 /**
- * For sessionHints, sessionModes, and sessionTags, each bit from the left corresponds to the support status of
- * that same value in the enum. For example, POWER_EFFICIENCY and GRAPHICS_PIPELINE are enabled for SessionMode.
+ * For sessionHints, sessionModes, and sessionTags, each bit from the left corresponds to the
+ * support status of that same value in the enum. For example, POWER_EFFICIENCY and
+ * GRAPHICS_PIPELINE are enabled for SessionMode.
  * https://android.googlesource.com/platform/hardware/interfaces/+/refs/heads/main/power/aidl/android/hardware/power
  */
 ndk::ScopedAStatus Power::getSupportInfo(SupportInfo* _aidl_return) {
-    static SupportInfo supportInfo = {
-                                    .usesSessions = true,
-                                    .boosts = 0b0,
-                                    .modes = 0b10001100,
-                                    .sessionHints = 0b1100001111,
-                                    .sessionModes = 0b0011,
-                                    .sessionTags = 0b001111,
-                                    .compositionData = {
-                                            .isSupported = false,
-                                            .disableGpuFences = false,
-                                            .maxBatchSize = 1,
-                                            .alwaysBatch = false,
-                                    },
-                                    .headroom = {
-                                            .isCpuSupported = true,
-                                            .isGpuSupported = true,
-                                            .cpuMinIntervalMillis = 1000,
-                                            .gpuMinIntervalMillis = 1000,
-                                            .cpuMinCalculationWindowMillis = 50,
-                                            .cpuMaxCalculationWindowMillis = CPU_MAX_DURATION_MS,
-                                            .gpuMinCalculationWindowMillis = 50,
-                                            .gpuMaxCalculationWindowMillis = GPU_MAX_DURATION_MS,
-                                            .cpuMaxTidCount = 5,
-                                    }};
+    static SupportInfo supportInfo = {.usesSessions = true,
+                                      .modes = 0b10001100,
+                                      .boosts = 0b0,
+                                      .sessionHints = 0b1100001111,
+                                      .sessionModes = 0b0011,
+                                      .sessionTags = 0b001111,
+                                      .compositionData =
+                                              {
+                                                      .isSupported = false,
+                                                      .disableGpuFences = false,
+                                                      .maxBatchSize = 1,
+                                                      .alwaysBatch = false,
+                                              },
+                                      .headroom = {
+                                              .isCpuSupported = true,
+                                              .isGpuSupported = true,
+                                              .cpuMinIntervalMillis = 1000,
+                                              .gpuMinIntervalMillis = 1000,
+                                              .cpuMinCalculationWindowMillis = 50,
+                                              .cpuMaxCalculationWindowMillis = CPU_MAX_DURATION_MS,
+                                              .gpuMinCalculationWindowMillis = 50,
+                                              .gpuMaxCalculationWindowMillis = GPU_MAX_DURATION_MS,
+                                              .cpuMaxTidCount = 5,
+                                      }};
     // Copy the support object into the binder
     *_aidl_return = supportInfo;
     return ndk::ScopedAStatus::ok();

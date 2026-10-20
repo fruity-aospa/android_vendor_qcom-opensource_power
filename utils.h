@@ -25,10 +25,6 @@
  * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Changes from Qualcomm Technologies, Inc. are provided under the following license:
- * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
- * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
 #ifndef __UTILS_H__
@@ -44,30 +40,34 @@ typedef struct {
     char value[PROP_VALUE_MAX];
 } PropVal;
 
-int sysfs_read(char *path, char *s, int num_bytes);
-int sysfs_write(char *path, char *s);
+int sysfs_read(const char* path, char* s, int num_bytes);
+int sysfs_write(const char* path, char* s);
 int get_scaling_governor(char governor[], int size);
-int get_scaling_governor_check_cores(char governor[], int size,int core_num);
+int get_scaling_governor_check_cores(char governor[], int size, int core_num);
 int is_interactive_governor(char*);
+int is_schedutil_governor(char*);
 
-void vote_ondemand_io_busy_off();
-void unvote_ondemand_io_busy_off();
-void vote_ondemand_sdf_low();
-void unvote_ondemand_sdf_low();
-void perform_hint_action(int hint_id, int resource_values[],
-    int num_resources);
+int perform_hint_action(int hint_id, int resource_values[], int num_resources);
 void undo_hint_action(int hint_id);
+void undo_initial_hint_action();
 void release_request(int lock_handle);
+void interaction(int duration, int num_args, int opt_list[]);
 int interaction_with_handle(int lock_handle, int duration, int num_args, int opt_list[]);
 int perf_hint_enable(int hint_id, int duration);
+int perf_hint_enable_with_type(int hint_id, int duration, int type);
 int send_perf_hint(int hint_id, const char* pkg, int duration, int type);
 int send_perf_get_feedback(int hint_id, const char* pkg);
 int send_perf_get_feedback_extn(int hint_id, const char* pkg, int numArgs, int list[]);
+int send_perf_event(int event_id, const char* pkg, int numArgs, int list[]);
 const char* send_perf_sync_request(int hint_id);
-PropVal perf_get_property(const char *prop , const char *def_val);
+
+long long calc_timespan_us(struct timespec start, struct timespec end);
+int get_soc_id(void);
+
+PropVal perf_get_property(const char* prop, const char* def_val);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif //__UTILS_H__
+#endif  //__UTILS_H__
