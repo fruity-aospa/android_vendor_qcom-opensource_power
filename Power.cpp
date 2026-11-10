@@ -243,6 +243,9 @@ ndk::ScopedAStatus Power::createHintSessionWithConfig(
        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
     }
     auto out = createHintSession(tgid, uid, threadIds, durationNanos, _aidl_return);
+    if (!out.isOk()) {
+        return out;
+    }
     static_cast<PowerHintSessionImpl*>(_aidl_return->get())->getSessionConfig(config);
     return out;
 }
