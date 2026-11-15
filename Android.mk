@@ -95,6 +95,17 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_CFLAGS += -Wno-unused-parameter -Wno-unused-variable
 LOCAL_VENDOR_MODULE := true
 include $(BUILD_EXECUTABLE)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := qti_power_hint_session_test
+LOCAL_VENDOR_MODULE := true
+LOCAL_SRC_FILES := PowerHintSession.cpp tests/PowerHintSessionTest.cpp
+LOCAL_C_INCLUDES := $(LOCAL_PATH)
+LOCAL_SHARED_LIBRARIES := libbase libbinder_ndk libcutils libdl liblog android.hardware.power-V6-ndk
+LOCAL_GTEST := true
+LOCAL_CPP_STD := c++20
+LOCAL_CPPFLAGS := -Wno-unused-variable
+include $(BUILD_NATIVE_TEST)
 endif
 
 

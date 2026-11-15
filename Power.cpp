@@ -124,9 +124,19 @@ ndk::ScopedAStatus Power::setMode(Mode type, bool enabled) {
             power_hint(POWER_HINT_INTERACTION, NULL);
             break;
         case Mode::SUSTAINED_PERFORMANCE:
-        case Mode::FIXED_PERFORMANCE:
-            power_hint(POWER_HINT_SUSTAINED_PERFORMANCE, NULL);
+        case Mode::FIXED_PERFORMANCE: {
+            std::lock_guard<std::mutex> lock(mSustainedModeMutex);
+            const bool wasEnabled = mSustainedPerformanceEnabled || mFixedPerformanceEnabled;
+            (type == Mode::SUSTAINED_PERFORMANCE ? mSustainedPerformanceEnabled
+                                               : mFixedPerformanceEnabled) = enabled;
+            const bool isEnabled = mSustainedPerformanceEnabled || mFixedPerformanceEnabled;
+            // Both modes share one legacy hint; retain it until the last mode is disabled.
+            if (wasEnabled != isEnabled) {
+                int enableHint = 1;
+                power_hint(POWER_HINT_SUSTAINED_PERFORMANCE, isEnabled ? &enableHint : nullptr);
+            }
             break;
+        }
         default:
             LOG(INFO) << "Mode " << static_cast<int32_t>(type) << "Not Supported";
             break;

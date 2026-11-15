@@ -12,6 +12,7 @@
 #include "performance.h"
 #include <cutils/properties.h>
 #include <dlfcn.h>
+#include <algorithm>
 #include <cmath>
 
 #define PERF_EXT_LIB_PROP "ro.vendor.extension_library"
@@ -20,10 +21,7 @@
 #define DEFAULT_MAX_PIPELINE_NUM "3"
 #define PROP_VAL_LENGTH 92
 
-#define CPU_BOOST_HINT 0x0000104E
 #define MAX_THREADS 16
-#define MAX_BOOST 200
-#define MIN_BOOST -200
 
 #define SCHED_TASK_LOAD_BOOST 0x43C04000
 #define MAX_TLB_THREADS 5
@@ -32,15 +30,12 @@
 #define INC_TLB_PCT 10
 #define DEC_TLB_PCT -10
 
-std::unordered_map<PowerHintSessionImpl*, int32_t> mPowerHintSessions;
-std::mutex mSessionLock;
-
 static int validateBoost(int boostVal, int boostSum) {
     boostSum += boostVal;
-    if (boostSum > MAX_BOOST)
-        return MAX_BOOST;
-    else if(boostSum < MIN_BOOST)
-        return MIN_BOOST;
+    if (boostSum > MAX_TLB_PCT)
+        return MAX_TLB_PCT;
+    else if(boostSum < MIN_TLB_PCT)
+        return MIN_TLB_PCT;
     return boostSum;
 }
 
@@ -76,9 +71,18 @@ bool PowerHintSessionImpl::perfBoost(int boostVal, int hintType) {
 
     tBoostSum = validateBoost(boostVal, tBoostSum);
     if (tBoostSum != 0) {
-        mHandlePerfHint = perf_hint_enable(CPU_BOOST_HINT, tBoostSum);
+        // perf_hint takes a duration; signed load belongs to the per-thread WALT resource.
+        const size_t numThreads = std::min(mThreadIds.size(), size_t{MAX_TLB_THREADS});
+        std::vector<int> votes;
+        votes.reserve(numThreads * 2);
+        for (size_t i = 0; i < numThreads; ++i) {
+            votes.push_back(SCHED_TASK_LOAD_BOOST);
+            votes.push_back((std::abs(tBoostSum) & 0x7F) |
+                            ((tBoostSum < 0) ? 0x80 : 0x00) | (mThreadIds[i] << 8));
+        }
+        mHandlePerfHint = interaction_with_handle(-1, 0, votes.size(), votes.data());
         if (mHandlePerfHint < 0) {
-            LOG(ERROR) << "Unable to acquire Perf hint for" << CPU_BOOST_HINT;
+            LOG(ERROR) << "Unable to acquire per-thread CPU load boost";
             return false;
         }
     }
@@ -155,20 +159,6 @@ bool PowerHintSessionImpl::taskLoadBoost(int loadType) {
     return true;
 }
 
-bool isSessionAlive(PowerHintSessionImpl* session) {
-    if (mPowerHintSessions.find(session) != mPowerHintSessions.end())
-        return true;
-    return false;
-}
-
-bool isSessionActive(PowerHintSessionImpl* session) {
-    if (!isSessionAlive(session))
-        return false;
-    if (mPowerHintSessions[session] == 1)
-        return true;
-    return false;
-}
-
 std::shared_ptr<aidl::android::hardware::power::IPowerHintSession> setPowerHintSession(int32_t tgid, int32_t uid, const std::vector<int32_t>& threadIds, int64_t durationNanos){
     LOG(INFO) << "setPowerHintSession ";
     std::shared_ptr<aidl::android::hardware::power::IPowerHintSession> mPowerSession = ndk::SharedRefBase::make<PowerHintSessionImpl>(tgid, uid, threadIds, durationNanos);
@@ -181,14 +171,6 @@ std::shared_ptr<aidl::android::hardware::power::IPowerHintSession> setPowerHintS
 
 int64_t getSessionPreferredRate(){
     return 16666666L;
-}
-
-void setSessionActivity(PowerHintSessionImpl* session, bool flag) {
-    std::lock_guard<std::mutex> mLockGuard(mSessionLock);
-    if (flag)
-        mPowerHintSessions[session] = 1;
-    else
-        mPowerHintSessions[session] = 0;
 }
 
 void PowerHintSessionImpl::getPerfProperties() {
@@ -243,7 +225,6 @@ PowerHintSessionImpl::PowerHintSessionImpl(int32_t tgid, int32_t uid, const std:
     mTLBoostSum = 0;
     mIsTopAppGame = false;
     updateTargetWorkDuration(durationNanos); // mTargetWorkDurationNanos, mThresholdNanos
-    setSessionActivity(this, true);
 }
 
 PowerHintSessionImpl::~PowerHintSessionImpl(){
@@ -308,6 +289,9 @@ double PowerHintSessionImpl::nextSupportedFPS(double fps) {
 }
 
 ndk::ScopedAStatus PowerHintSessionImpl::updateTargetWorkDuration(int64_t in_targetDurationNanos){
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mClosed)
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     // TODO: top app is game check
     LOG(INFO) << "PowerHintSessionImpl::updateTargetWorkDuration: " << in_targetDurationNanos;
     if (in_targetDurationNanos <= 0) {
@@ -325,8 +309,11 @@ ndk::ScopedAStatus PowerHintSessionImpl::updateTargetWorkDuration(int64_t in_tar
 }
 
 ndk::ScopedAStatus PowerHintSessionImpl::reportActualWorkDuration(const std::vector<::aidl::android::hardware::power::WorkDuration>& in_durations){
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mClosed || !mActive)
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     // TODO: top app is game check
-    LOG(INFO) << "PowerHintSessionImpl::reportActualWorkDuration: ";
+    LOG(VERBOSE) << "PowerHintSessionImpl::reportActualWorkDuration: ";
     int64_t targetWorkDurationNanos = mTargetWorkDurationNanos;
     if (targetWorkDurationNanos == -1 || in_durations.empty()) {
         return ndk::ScopedAStatus::ok();
@@ -353,39 +340,44 @@ ndk::ScopedAStatus PowerHintSessionImpl::reportActualWorkDuration(const std::vec
     return ndk::ScopedAStatus::ok();
 }
 ndk::ScopedAStatus PowerHintSessionImpl::pause(){
+    std::lock_guard<std::mutex> lock(mMutex);
     LOG(INFO) << "PowerHintSessionImpl::pause ";
-    if (isSessionAlive(this)) {
-        sendHint(aidl::android::hardware::power::SessionHint::CPU_LOAD_RESET);
-        setSessionActivity(this, false);
+    if (!mClosed && mActive) {
+        perfBoost(0, LOAD_RESET);
+        taskLoadBoost(LOAD_RESET);
+        mConsecutiveDownCount = 0;
+        mActive = false;
     }
     return ndk::ScopedAStatus::ok();
 }
 ndk::ScopedAStatus PowerHintSessionImpl::resume(){
+    std::lock_guard<std::mutex> lock(mMutex);
     LOG(INFO) << "PowerHintSessionImpl::resume ";
-    if (isSessionAlive(this)) {
-        sendHint(aidl::android::hardware::power::SessionHint::CPU_LOAD_RESUME);
-        setSessionActivity(this, true);
+    if (!mClosed && !mActive) {
+        mActive = true;
+        perfBoost(0, LOAD_RESUME);
     }
     return ndk::ScopedAStatus::ok();
 }
 ndk::ScopedAStatus PowerHintSessionImpl::close(){
+    std::lock_guard<std::mutex> lock(mMutex);
     LOG(INFO) << "PowerHintSessionImpl::close ";
-    if (isSessionAlive(this)) {
-        sendHint(aidl::android::hardware::power::SessionHint::CPU_LOAD_RESET);
+    if (!mClosed) {
+        perfBoost(0, LOAD_RESET);
         taskLoadBoost(LOAD_RESET);
         releaseLowCpuUtil();
         releaseThreadPipeline();
         mThreadIds.clear();
 
-        mSessionLock.lock();
-        mPowerHintSessions.erase(this);
-        mSessionLock.unlock();
+        mActive = false;
+        mClosed = true;
     }
     return ndk::ScopedAStatus::ok();
 }
 ndk::ScopedAStatus PowerHintSessionImpl::sendHint(aidl::android::hardware::power::SessionHint hint){
+    std::lock_guard<std::mutex> lock(mMutex);
     LOG(INFO) << "PowerHintSessionImpl::sendHint ";
-    if (!isSessionActive(this))
+    if (mClosed || !mActive)
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     switch (hint)
     {
@@ -397,6 +389,9 @@ ndk::ScopedAStatus PowerHintSessionImpl::sendHint(aidl::android::hardware::power
             break;
         case aidl::android::hardware::power::SessionHint::CPU_LOAD_RESET:
             perfBoost(0, LOAD_RESET);
+            mBoostSum = 0;
+            taskLoadBoost(LOAD_RESET);
+            mConsecutiveDownCount = 0;
             break;
         case aidl::android::hardware::power::SessionHint::CPU_LOAD_RESUME:
             perfBoost(0, LOAD_RESUME);
@@ -410,24 +405,38 @@ ndk::ScopedAStatus PowerHintSessionImpl::sendHint(aidl::android::hardware::power
     return ndk::ScopedAStatus::ok();
 }
 ndk::ScopedAStatus PowerHintSessionImpl::setThreads(const std::vector<int32_t>& threadIds){
+    std::lock_guard<std::mutex> lock(mMutex);
     LOG(INFO) << "PowerHintSessionImpl::setThreads " << printThreads(threadIds, static_cast<int>(threadIds.size()));
     if (threadIds.size() == 0) {
         LOG(ERROR) << "Threads list is empty";
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
     }
-    mThreadIds = threadIds;
+    if (mClosed)
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
+
+    // Release modes while mThreadIds still identifies the replaced threads.
+    releaseLowCpuUtil();
+    releaseThreadPipeline();
 
     // reset task load boost
     mConsecutiveDownCount = 0;
     taskLoadBoost(LOAD_RESET);
+    resetBoost();
+    mThreadIds = threadIds;
+    if (mActive && mBoostSum != 0) {
+        perfBoost(0, LOAD_RESUME);
+    }
 
     // reset session hint
-    if (mPowerEfficiencyMode) setMode(aidl::android::hardware::power::SessionMode::POWER_EFFICIENCY, mPowerEfficiencyMode);
-    if (mGraphicsPipelineMode) setMode(aidl::android::hardware::power::SessionMode::GRAPHICS_PIPELINE, mGraphicsPipelineMode);
+    if (mPowerEfficiencyMode) hintLowCpuUtil();
+    if (mGraphicsPipelineMode) hintThreadPipeline();
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus PowerHintSessionImpl::setMode(aidl::android::hardware::power::SessionMode mode, bool enabled) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mClosed)
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     // TODO: top app is game check
     switch (mode) {
         case aidl::android::hardware::power::SessionMode::POWER_EFFICIENCY:
@@ -456,6 +465,9 @@ ndk::ScopedAStatus PowerHintSessionImpl::setMode(aidl::android::hardware::power:
 }
 
 ndk::ScopedAStatus PowerHintSessionImpl::getSessionConfig(aidl::android::hardware::power::SessionConfig* _aidl_return) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mClosed)
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     _aidl_return->id = 1;
     return ndk::ScopedAStatus::ok();
 }

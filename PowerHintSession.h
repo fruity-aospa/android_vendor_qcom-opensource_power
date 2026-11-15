@@ -6,8 +6,6 @@
 #ifndef __POWERHINTSESSION__
 #define __POWERHINTSESSION__
 
-#include <unordered_map>
-#include <set>
 #include <mutex>
 
 #include <aidl/android/hardware/power/WorkDuration.h>
@@ -48,6 +46,9 @@ public:
     void releaseLowCpuUtil();
     void resetBoost();
 private:
+    std::mutex mMutex;
+    bool mActive = true;
+    bool mClosed = false;
     int32_t mUid;
     int32_t mTgid;
     int mHandle;
