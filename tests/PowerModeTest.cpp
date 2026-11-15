@@ -7,12 +7,18 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <thread>
 
 using aidl::android::hardware::power::Mode;
+using aidl::android::hardware::power::CpuHeadroomParams;
+using aidl::android::hardware::power::CpuHeadroomResult;
+using aidl::android::hardware::power::GpuHeadroomParams;
+using aidl::android::hardware::power::GpuHeadroomResult;
 using aidl::android::hardware::power::impl::Power;
 
 namespace {
@@ -21,6 +27,7 @@ std::map<int, int> perfRequests;
 int nextHandle = 1;
 int acquired = 0;
 int released = 0;
+int feedbackHeadroom = -1;
 
 size_t activeRequests() {
     std::lock_guard<std::mutex> lock(perfMutex);
@@ -53,10 +60,12 @@ extern "C" void release_request(int handle) {
     ++released;
 }
 
-// Other Power APIs are compiled but not exercised by these mode tests.
+// Observe the feedback result returned to the actual Power implementation.
 extern "C" void interaction(int, int, int[]) {}
 extern "C" int interaction_with_handle(int, int, int, int[]) { return -1; }
-extern "C" int send_perf_get_feedback_extn(int, const char*, int, int[]) { return -1; }
+extern "C" int send_perf_get_feedback_extn(int, const char*, int, int[]) {
+    return feedbackHeadroom;
+}
 extern "C" PropVal perf_get_property(const char*, const char* defaultValue) {
     PropVal value{};
     std::strncpy(value.value, defaultValue, sizeof(value.value) - 1);
@@ -157,4 +166,46 @@ TEST_F(PowerModeTest, ConcurrentModeChangesBalanceSharedRequest) {
     EXPECT_EQ(activeRequests(), 0u);
     EXPECT_GT(acquired, 0);
     EXPECT_EQ(acquired, released);
+}
+
+TEST(PowerHeadroomTest, UnavailableCpuFeedbackDoesNotReportZeroHeadroom) {
+    Power power;
+    for (const int unavailable : {-1, -22, 101, std::numeric_limits<int>::max()}) {
+        feedbackHeadroom = unavailable;
+        CpuHeadroomResult result;
+        ASSERT_TRUE(power.getCpuHeadroom(CpuHeadroomParams{}, &result).isOk());
+        EXPECT_TRUE(std::isnan(result.get<CpuHeadroomResult::Tag::globalHeadroom>()))
+                << "feedback=" << unavailable;
+    }
+}
+
+TEST(PowerHeadroomTest, UnavailableGpuFeedbackDoesNotReportZeroHeadroom) {
+    Power power;
+    for (const int unavailable : {-1, -22, 101, std::numeric_limits<int>::max()}) {
+        feedbackHeadroom = unavailable;
+        GpuHeadroomResult result;
+        ASSERT_TRUE(power.getGpuHeadroom(GpuHeadroomParams{}, &result).isOk());
+        EXPECT_TRUE(std::isnan(result.get<GpuHeadroomResult::Tag::globalHeadroom>()))
+                << "feedback=" << unavailable;
+    }
+}
+
+TEST(PowerHeadroomTest, CpuFeedbackPreservesValidZeroAndCapacity) {
+    Power power;
+    for (const int headroom : {0, 1, 50, 100}) {
+        feedbackHeadroom = headroom;
+        CpuHeadroomResult result;
+        ASSERT_TRUE(power.getCpuHeadroom(CpuHeadroomParams{}, &result).isOk());
+        EXPECT_FLOAT_EQ(result.get<CpuHeadroomResult::Tag::globalHeadroom>(), headroom);
+    }
+}
+
+TEST(PowerHeadroomTest, GpuFeedbackPreservesValidZeroAndCapacity) {
+    Power power;
+    for (const int headroom : {0, 1, 50, 100}) {
+        feedbackHeadroom = headroom;
+        GpuHeadroomResult result;
+        ASSERT_TRUE(power.getGpuHeadroom(GpuHeadroomParams{}, &result).isOk());
+        EXPECT_FLOAT_EQ(result.get<GpuHeadroomResult::Tag::globalHeadroom>(), headroom);
+    }
 }

@@ -53,6 +53,7 @@ static const char *pkg = "QTI PowerHAL";
 #include <fmq/EventFlag.h>
 
 #include <android-base/logging.h>
+#include <limits>
 #include <thread>
 #include <aidl/android/hardware/power/BnPower.h>
 
@@ -197,8 +198,10 @@ ndk::ScopedAStatus Power::getCpuHeadroom(const CpuHeadroomParams& cpuHeadroomPar
 
     int args[] = { CPU_HEADROOM_TOTAL, durationMillis / 1000 };
     int headroom = send_perf_get_feedback_extn(VENDOR_FEEDBACK_CPU_HEADROOM, pkg, 2, args);
-    if (headroom < 0) {
+    if (headroom < 0 || headroom > 100) {
         LOG(ERROR) << "Failed to get CPU headroom";
+        cpuHeadroomResult->set<CpuHeadroomResult::Tag::globalHeadroom>(
+                std::numeric_limits<float>::quiet_NaN());
         return ndk::ScopedAStatus::ok();
     }
     cpuHeadroomResult->set<CpuHeadroomResult::Tag::globalHeadroom>(static_cast<float>(headroom));
@@ -225,8 +228,10 @@ ndk::ScopedAStatus Power::getGpuHeadroom(const GpuHeadroomParams& gpuHeadroomPar
 
     int args[] = { calculationType, durationMillis / 1000 };
     int headroom = send_perf_get_feedback_extn(VENDOR_FEEDBACK_GPU_HEADROOM, pkg, 2, args);
-    if (headroom < 0) {
+    if (headroom < 0 || headroom > 100) {
        LOG(ERROR) << "Failed to get GPU headroom";
+       gpuHeadroomResult->set<GpuHeadroomResult::Tag::globalHeadroom>(
+               std::numeric_limits<float>::quiet_NaN());
        return ndk::ScopedAStatus::ok();
     }
     gpuHeadroomResult->set<GpuHeadroomResult::Tag::globalHeadroom>(static_cast<float>(headroom));
